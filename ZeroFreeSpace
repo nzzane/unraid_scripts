@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# User-defined variables
+TARGET_DISK="disk1"  # Replace 'cache' with 'cache' for the cache disk or 'disk1', 'disk2', etc., for other disks
+NUM_PASSES=3  # Number of passes to write and delete the file
+
+# Determine the mount point based on Unraid conventions
+if [ "$TARGET_DISK" == "cache" ]; then
+    TARGET_MOUNT_POINT="/mnt/cache"
+else
+    TARGET_MOUNT_POINT="/mnt/${TARGET_DISK}"
+fi
+
+# Check if the directory exists
+if [ ! -d "$TARGET_MOUNT_POINT" ]; then
+    echo "Error: $TARGET_MOUNT_POINT does not exist."
+    exit 1
+fi
+
+# Function to get and print disk usage
+function print_disk_usage {
+    echo "Current Disk Usage for $TARGET_MOUNT_POINT:"
+    df -h | grep "$TARGET_MOUNT_POINT" | awk '{print "Used: " $3 " of " $2 ", Free: " $4}'
+}
+
+# Main operation loop
+for (( pass=1; pass<=NUM_PASSES; pass++ ))
+do
+    echo "Pass $pass of $NUM_PASSES:"
+    print_disk_usage
+    
+    # Navigate to the target mount point
+    cd $TARGET_MOUNT_POINT
+
+    # Create a random data-filled file to occupy all free space
+    echo "Starting random-fill of free space on $TARGET_DISK at $TARGET_MOUNT_POINT..."
+    dd if=/dev/urandom of=random_fill bs=1M status=progress || true
+
+    # Print disk usage after filling
+    print_disk_usage
+
+    # Once the disk is full and dd fails, delete the random-filled file
+    echo "Deleting random-fill file to free space..."
+    rm -f random_fill
+
+    # Print disk usage after deleting
+    print_disk_usage
+done
+
+# Confirm completion
+echo "Random filling free space on $TARGET_DISK completed successfully across $NUM_PASSES passes."
