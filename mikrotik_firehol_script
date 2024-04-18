@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# Define paths for working and final directories
+TEMP_DIR="/tmp/firehol_temp"
+mkdir -p "$TEMP_DIR"
+FINAL_DIR="/mnt/cache_system/appdata/nginx/www/mikrotik"
+
+# Define file paths
+RSC_FILE="$FINAL_DIR/firehol.rsc"
+PREV_IPS_FILE="$FINAL_DIR/firehol_prev_ips.txt"
+CURRENT_IPS_FILE="$TEMP_DIR/firehol_cur_ips.txt"
+
+# Define the Discord webhook URL
+DISCORD_WEBHOOK_URL="WEBHOOKURL"
+
+# Define excluded private IP ranges
+EXCLUDED_PRIVATE_IP_RANGES=("0.0.0.0/8" "10.0.0.0/8" "127.0.0.0/8" "192.168.0.0/16" "224.0.0.0/3")
+
+# Define FireHOL blocklist URLs and names
+BLOCKLISTS=(
+  "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset FireHOL_Level1"
+  "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset FireHOL_Level2"
+  "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webclient.netset FireHOL_WebClient"
+  "https://iplists.firehol.org/files/bruteforceblocker.ipset BruteForceBlocker"
+  "https://iplists.firehol.org/files/et_compromised.ipset ET_Compromised"
+  "https://iplists.firehol.org/files/et_dshield.netset ET_dshield"
+  "https://iplists.firehol.org/files/blocklist_de_strongips.ipset DE_StrongIP"
+  "https://iplists.firehol.org/files/cybercrime.ipset Cybercrime"
+)
+
+# Clear the current IP file
+: > "$CURRENT_IPS_FILE"
+: > "$RSC_FILE"
+
+# Download and process blocklists
+for block in "${BLOCKLISTS[@]}"; do
+  url="${block%% *}"
+  list_name="${block##* }"
+  wget -q -O "$TEMP_DIR/$list_name.netset" "$url"
+  # Append IPs to the CURRENT_IPS_FILE with list name
+  grep -vE '^#|^$' "$TEMP_DIR/$list_name.netset" | while read -r ip; do
+    echo "$ip $list_name" >> "$CURRENT_IPS_FILE"
+  done
+done
+
+# Initialize MikroTik script with removal of all previous entries
+echo "/ip firewall address-list remove [find list=firehol]" > "$RSC_FILE"
+
+# Process IPs and add to MikroTik script, skipping excluded ranges
+while IFS=' ' read -r ip list_name; do
+  for range in "${EXCLUDED_PRIVATE_IP_RANGES[@]}"; do
+    [[ "$ip" == *"$range"* ]] && continue 2
+  done
+  echo "/ip firewall address-list add list=firehol address=$ip comment='$list_name'" >> "$RSC_FILE"
+done < "$CURRENT_IPS_FILE"
+
+# Move the Mikrotik RSC file to the final directory
+mv "$RSC_FILE" "$FINAL_DIR/firehol.rsc"
+
+# File size and line count
+SIZE=$(stat -c %s "$FINAL_DIR/firehol.rsc")
+LINE_COUNT=$(wc -l < "$FINAL_DIR/firehol.rsc")
+
+# Compare current and previous IPs
+if [ -f "$PREV_IPS_FILE" ]; then
+    ADDED_IPS=$(comm -13 <(sort "$PREV_IPS_FILE") <(sort "$CURRENT_IPS_FILE") | wc -l)
+    REMOVED_IPS=$(comm -23 <(sort "$PREV_IPS_FILE") <(sort "$CURRENT_IPS_FILE") | wc -l)
+else
+    ADDED_IPS=$(wc -l < "$CURRENT_IPS_FILE")
+    REMOVED_IPS=0
+fi
+
+# Update previous IPs file
+cp "$CURRENT_IPS_FILE" "$PREV_IPS_FILE"
+
+# Prepare and send the Discord message
+DISCORD_MESSAGE="Mikrotik RSC file updated. Size: $(($SIZE / 1024)) KB, Line Count: $LINE_COUNT, IPs Added: $ADDED_IPS, IPs Removed: $REMOVED_IPS."
+curl -X POST -H "Content-Type: application/json" -d "{\"content\":\"$DISCORD_MESSAGE\"}" "$DISCORD_WEBHOOK_URL"
+
+# Cleanup
+rm -rf "$TEMP_DIR"
