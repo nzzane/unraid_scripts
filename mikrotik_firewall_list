@@ -1,110 +1,78 @@
 #!/bin/bash
 
-# Define the URL to download the GeoLite2-Country-CSV (adjust the URL as needed)
-GEOIP_CSV_URL="###########################"
+# Define the URL to download the GeoLite2-Country-CSV
+GEOIP_CSV_URL="MAXMIND_URL_API_KEY"
 
 # Directory to save the GeoLite2-Country-CSV files
-OUTPUT_DIR="/mnt/"
+OUTPUT_DIR="/mnt/cache_system/appdata/nginx/www/mikrotik"
+TEMP_DIR=$(mktemp -d)  # Temporary directory for current operation
+CURRENT_IPS_FILE="$TEMP_DIR/AUNZ_cur_ips.txt"  # Temporary file for current IPs
+PREV_IPS_FILE="$OUTPUT_DIR/AUNZ_prev_ips.txt"  # File to store list of previous IPs
 
 # Name of the address list in MikroTik
-ADDRESS_LIST_NAME="GeoBlocks"
+ADDRESS_LIST_NAME="AUNZ"
 
-# Discord webhook URL
-DISCORD_WEBHOOK_URL="##############################"
+# Discord webhook URL and User ID for notifications
+DISCORD_WEBHOOK_URL="WEBHOOKURL"
+DISCORD_USER_ID="USERID"
 
-# Your Discord User ID for pinging
-DISCORD_USER_ID="#######################################"
-
-# Function to send a Discord message with user mention
-send_discord_message() {
+# Functions
+function send_discord_message() {
     local message="$1"
-    local mention="<@$DISCORD_USER_ID>"  # Mention the user using their ID
     local file_info="$2"
+    local mention="<@$DISCORD_USER_ID>"
     curl -H "Content-Type: application/json" -X POST -d "{\"content\":\"$mention $message\n$file_info\"}" "$DISCORD_WEBHOOK_URL"
 }
 
-# Function to check file size and line count
-check_file_criteria() {
-    local file_path="$1"
-    local min_size_kb="$2"
-    local min_line_count="$3"
-    
-    local file_size_kb=$(du -k "$file_path" | awk '{print $1}')
-    local line_count=$(wc -l < "$file_path")
-    
-    if [ "$file_size_kb" -ge "$min_size_kb" ] || [ "$line_count" -ge "$min_line_count" ]; then
-        return 0  # File meets criteria
-    else
-        return 1  # File does not meet criteria
-    fi
-}
-
-# Function to get file information (size in MB with one decimal point and line count)
-get_file_info() {
+function get_file_info() {
     local file_path="$1"
     local file_size_bytes=$(stat -c %s "$file_path")
     local file_size_mb=$(bc <<< "scale=1; $file_size_bytes / 1024 / 1024")
     local line_count=$(wc -l < "$file_path")
-    echo "File Size: ${file_size_mb} MB\nLine Count: $line_count"
+    echo "File Size: ${file_size_mb} MB, Line Count: $line_count"
 }
 
-# Map country codes to Geoname IDs
-declare -A COUNTRY_GEONAMES
-COUNTRY_GEONAMES["CN"]="1814991"   # China
-COUNTRY_GEONAMES["RU"]="2017370"   # Russia
-
-# Download the GeoLite2-Country-CSV and unzip it directly into the output directory
+# Download and unpack the CSV data
 mkdir -p "$OUTPUT_DIR"
-TEMP_DIR=$(mktemp -d)
 curl -o "$TEMP_DIR/GeoLite2-Country-CSV.zip" "$GEOIP_CSV_URL"
 unzip "$TEMP_DIR/GeoLite2-Country-CSV.zip" -d "$TEMP_DIR"
 
-# Check if the download and unzip were successful
-if [ $? -eq 0 ]; then
-    DOWNLOAD_MESSAGE="GeoLite2-Country-CSV downloaded and unzipped successfully."
-    FILE_INFO=$(get_file_info "$TEMP_DIR/GeoLite2-Country-CSV.zip")
-    send_discord_message "$DOWNLOAD_MESSAGE" "$FILE_INFO"
-else
-    ERROR_MESSAGE="Failed to download or unzip GeoLite2-Country-CSV."
-    send_discord_message "$ERROR_MESSAGE"
-    exit 1
-fi
-
-# Identify the dynamically created folder with the date
+# Define country codes and their GeoName IDs
+declare -A COUNTRY_GEONAMES=(["NZ"]="2186224" ["AU"]="2077456")
 CSV_FOLDER=$(find "$TEMP_DIR" -type d -name "GeoLite2-Country-CSV_*" | sort | tail -n 1)
 
-# Initialize the MikroTik import script
-MikroTikScript="$OUTPUT_DIR/firewall_script.rsc"
-echo "/ip firewall address-list remove [find list=$ADDRESS_LIST_NAME]" > "$MikroTikScript"
-
-# Process the CSV files and generate MikroTik script entries for specified countries
+# Extract subnets for specified countries
+: > "$CURRENT_IPS_FILE"
 for country_code in "${!COUNTRY_GEONAMES[@]}"; do
     geoname_id="${COUNTRY_GEONAMES[$country_code]}"
-    # Extract subnets for the specified Geoname ID from the CSV file
-    awk -F ',' -v geoname_id="$geoname_id" -v country_code="$country_code" '$3 == geoname_id {print $1}' "$CSV_FOLDER/GeoLite2-Country-Blocks-IPv4.csv" |
-    while read -r subnet; do
-        # Generate MikroTik add address list command with a comment indicating the country
-        echo "/ip firewall address-list add list=$ADDRESS_LIST_NAME address=$subnet comment=\"$country_code\""
-    done >> "$MikroTikScript"
+    awk -F ',' -v id="$geoname_id" '$3 == id {print $1 "," country_code}' "$CSV_FOLDER/GeoLite2-Country-Blocks-IPv4.csv" >> "$CURRENT_IPS_FILE"
+done
+sort -u "$CURRENT_IPS_FILE" -o "$CURRENT_IPS_FILE"
+
+# Initialize MikroTik script
+MikroTikScript="$OUTPUT_DIR/AUNZ_GeoIP.rsc"
+echo "/ip firewall address-list remove [find list=$ADDRESS_LIST_NAME]" > "$MikroTikScript"
+
+# Add all current IPs to the MikroTik script
+cat "$CURRENT_IPS_FILE" | while IFS=',' read subnet country_code; do
+    echo "/ip firewall address-list add list=$ADDRESS_LIST_NAME address=$subnet comment='$country_code'" >> "$MikroTikScript"
 done
 
-# Check if the generated MikroTik script meets size and line count criteria
-if check_file_criteria "$MikroTikScript" 2000 15000; then
-    SCRIPT_SIZE_LINE_MESSAGE="MikroTik import script meets criteria (size >= 2000KB or line count >= 15000)."
-    SCRIPT_FILE_INFO=$(get_file_info "$MikroTikScript")
-    send_discord_message "$SCRIPT_SIZE_LINE_MESSAGE" "$SCRIPT_FILE_INFO"
-else
-    SCRIPT_SIZE_LINE_ERROR="MikroTik import script does not meet criteria (size < 2000KB and line count < 15000).\nFile Info: $(get_file_info "$MikroTikScript")"
-    send_discord_message "$SCRIPT_SIZE_LINE_ERROR"
-    exit 1
+# Compare and update IPs, notify via Discord
+if [ -f "$PREV_IPS_FILE" ]; then
+    sort -u "$PREV_IPS_FILE" -o "$PREV_IPS_FILE"
+    ADDED_IPS=$(comm -13 <(sort "$PREV_IPS_FILE") <(sort "$CURRENT_IPS_FILE") | wc -l)
+    REMOVED_IPS=$(comm -23 <(sort "$PREV_IPS_FILE") <(sort "$CURRENT_IPS_FILE") | wc -l)
+    echo "IPs Added: $ADDED_IPS, IPs Removed: $REMOVED_IPS"  # Console output for logs
 fi
 
-# Clean up the downloaded ZIP file and temporary directory
-rm -rf "$TEMP_DIR"
+# Always update the previous IP list after the run
+cp "$CURRENT_IPS_FILE" "$PREV_IPS_FILE"
 
-# Remove the GeoLite2-Country-CSV folder
-rm -rf "$CSV_FOLDER"
+# Clean up
+rm -rf "$TEMP_DIR" "$CSV_FOLDER"
 
-# Display a message when the script is finished
-SCRIPT_COMPLETE_MESSAGE="MikroTik import script generated in $MikroTikScript"
-send_discord_message "$SCRIPT_COMPLETE_MESSAGE" "$(get_file_info "$MikroTikScript")"
+# Notify completion
+FILE_INFO=$(get_file_info "$MikroTikScript")
+send_discord_message "MikroTik script updated with new IPs. IPs Added: $ADDED_IPS, IPs Removed: $REMOVED_IPS." "$FILE_INFO"
+echo "MikroTik configuration script generated: $MikroTikScript, Details: $FILE_INFO"
