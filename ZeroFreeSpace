@@ -1,65 +1,82 @@
 #!/bin/bash
 
 # User-defined variables
-TARGET_DISK="disk1"  # Replace 'cache' with 'cache' for the cache disk or 'disk1', 'disk2', etc., for other disks
+TARGET_DISKS=("disk1" "disk2" "disk3")  # List of disks to process
 NUM_PASSES=1  # Number of passes to write and delete the file
 
-# Determine the mount point based on Unraid conventions
-if [ "$TARGET_DISK" == "cache" ]; then
-    TARGET_MOUNT_POINT="/mnt/cache"
-else
-    TARGET_MOUNT_POINT="/mnt/${TARGET_DISK}"
-fi
+# Function to determine the mount point based on Unraid conventions
+function get_mount_point {
+    local disk=$1
+    if [ "$disk" == "cache" ]; then
+        echo "/mnt/cache"
+    else
+        echo "/mnt/${disk}"
+    fi
+}
 
-# Check if the directory exists
-if [ ! -d "$TARGET_MOUNT_POINT" ]; then
-    echo "Error: $TARGET_MOUNT_POINT does not exist."
-    exit 1
-fi
+# Function to check if the directory exists
+function check_directory_exists {
+    local mount_point=$1
+    if [ ! -d "$mount_point" ]; then
+        echo "Error: $mount_point does not exist."
+        exit 1
+    fi
+}
 
 # Function to get and print disk usage
 function print_disk_usage {
-    echo "Current Disk Usage for $TARGET_MOUNT_POINT:"
-    df -h | grep "$TARGET_MOUNT_POINT" | awk '{print "Used: " $3 " of " $2 ", Free: " $4}'
+    local mount_point=$1
+    echo "Current Disk Usage for $mount_point:"
+    df -h | grep "$mount_point" | awk '{print "Used: " $3 " of " $2 ", Free: " $4}'
 }
 
-# Main operation loop
-for (( pass=1; pass<=NUM_PASSES; pass++ ))
-do
-    echo "Pass $pass of $NUM_PASSES:"
-    print_disk_usage
-    
-    # Navigate to the target mount point
-    cd $TARGET_MOUNT_POINT
+# Function to perform the wiping process
+function wipe_disk {
+    local target_disk=$1
+    local mount_point=$(get_mount_point $target_disk)
+    check_directory_exists $mount_point
 
-    # Create a random data-filled file to occupy all free space
-    echo "Starting random-fill of free space on $TARGET_DISK at $TARGET_MOUNT_POINT..."
-    dd if=/dev/urandom of=random_fill bs=1M status=progress || true
+    for (( pass=1; pass<=NUM_PASSES; pass++ )); do
+        echo "Pass $pass of $NUM_PASSES for $target_disk:"
+        print_disk_usage $mount_point
 
-    # Print disk usage after filling
-    print_disk_usage
+        # Navigate to the target mount point
+        cd $mount_point
 
-    # Once the disk is full and dd fails, delete the random-filled file
-    echo "Deleting random-fill file to free space..."
-    rm -f random_fill
+        # Create a random data-filled file to occupy all free space
+        echo "Starting random-fill of free space on $target_disk at $mount_point..."
+        dd if=/dev/urandom of=random_fill bs=1M status=progress || true
+
+        # Print disk usage after filling
+        print_disk_usage $mount_point
+
+        # Once the disk is full and dd fails, delete the random-filled file
+        echo "Deleting random-fill file to free space..."
+        rm -f random_fill
+
+        # Print disk usage after deleting
+        print_disk_usage $mount_point
+    done
+
+    # Final step: Write zeros to free space
+    echo "Final step: Writing zeros to free space on $target_disk at $mount_point..."
+    dd if=/dev/zero of=zero_fill bs=1M status=progress || true
+
+    # Print disk usage after zero-fill
+    print_disk_usage $mount_point
+
+    # Once the disk is full and dd fails, delete the zero-filled file
+    echo "Deleting zero-fill file to free space..."
+    rm -f zero_fill
 
     # Print disk usage after deleting
-    print_disk_usage
+    print_disk_usage $mount_point
+
+    # Confirm completion
+    echo "Random filling and zeroing free space on $target_disk completed successfully across $NUM_PASSES passes."
+}
+
+# Main operation loop for each disk
+for disk in "${TARGET_DISKS[@]}"; do
+    wipe_disk $disk
 done
-
-# Final step: Write zeros to free space
-echo "Final step: Writing zeros to free space on $TARGET_DISK at $TARGET_MOUNT_POINT..."
-dd if=/dev/zero of=zero_fill bs=1M status=progress || true
-
-# Print disk usage after zero-fill
-print_disk_usage
-
-# Once the disk is full and dd fails, delete the zero-filled file
-echo "Deleting zero-fill file to free space..."
-rm -f zero_fill
-
-# Print disk usage after deleting
-print_disk_usage
-
-# Confirm completion
-echo "Random filling and zeroing free space on $TARGET_DISK completed successfully across $NUM_PASSES passes."
