@@ -2,7 +2,7 @@
 
 # User-defined variables
 TARGET_DISK="disk1"  # Replace 'cache' with 'cache' for the cache disk or 'disk1', 'disk2', etc., for other disks
-NUM_PASSES=3  # Number of passes to write and delete the file
+NUM_PASSES=1  # Number of passes to write and delete the file
 
 # Determine the mount point based on Unraid conventions
 if [ "$TARGET_DISK" == "cache" ]; then
@@ -47,5 +47,19 @@ do
     print_disk_usage
 done
 
+# Final step: Write zeros to free space
+echo "Final step: Writing zeros to free space on $TARGET_DISK at $TARGET_MOUNT_POINT..."
+dd if=/dev/zero of=zero_fill bs=1M status=progress || true
+
+# Print disk usage after zero-fill
+print_disk_usage
+
+# Once the disk is full and dd fails, delete the zero-filled file
+echo "Deleting zero-fill file to free space..."
+rm -f zero_fill
+
+# Print disk usage after deleting
+print_disk_usage
+
 # Confirm completion
-echo "Random filling free space on $TARGET_DISK completed successfully across $NUM_PASSES passes."
+echo "Random filling and zeroing free space on $TARGET_DISK completed successfully across $NUM_PASSES passes."
